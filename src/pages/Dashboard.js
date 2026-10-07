@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import api from '../utils/api';
 
-export default function Dashboard() {
+export default function Dashboard({ onLogout }) {
   const [stats, setStats] = useState({
     totalWorkers: 0,
     totalCustomers: 0,
@@ -13,12 +13,14 @@ export default function Dashboard() {
   const [bookings, setBookings] = useState([]);
   const [workers, setWorkers] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
 
   useEffect(() => {
     fetchData();
   }, []);
 
   const fetchData = async () => {
+    setError('');
     try {
       const [bookingsRes, workersRes, customersRes] = await Promise.all([
         api.get('/admin/bookings'),
@@ -46,7 +48,10 @@ export default function Dashboard() {
       setBookings(allBookings.slice(0, 10));
       setWorkers(allWorkers.slice(0, 10));
     } catch (error) {
-      console.log('Error:', error);
+      // A 401 is handled globally in api.js (sends the user back to login).
+      if (error.response?.status !== 401) {
+        setError('Could not load data. Check your connection and press Refresh.');
+      }
     } finally {
       setLoading(false);
     }
@@ -85,8 +90,13 @@ export default function Dashboard() {
           <button style={styles.refreshBtn} onClick={fetchData}>
             🔄 Refresh
           </button>
+          <button style={styles.logoutBtn} onClick={onLogout}>
+            Logout
+          </button>
         </div>
       </div>
+
+      {error && <div style={styles.errorBox}>{error}</div>}
 
       {/* Stats Grid */}
       <div style={styles.statsGrid}>
@@ -266,6 +276,24 @@ const styles = {
     cursor: 'pointer',
     fontSize: '14px',
     fontWeight: '600',
+  },
+  logoutBtn: {
+    backgroundColor: 'transparent',
+    color: '#fff',
+    border: '1px solid #9b93ff',
+    padding: '10px 20px',
+    borderRadius: '8px',
+    cursor: 'pointer',
+    fontSize: '14px',
+    fontWeight: '600',
+  },
+  errorBox: {
+    backgroundColor: '#fee2e2',
+    color: '#b91c1c',
+    padding: '12px 16px',
+    borderRadius: '8px',
+    marginBottom: '16px',
+    fontSize: '14px',
   },
   statsGrid: {
     display: 'grid',
