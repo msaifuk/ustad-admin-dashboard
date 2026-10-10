@@ -9,11 +9,14 @@ export default function Dashboard({ onLogout }) {
     completedBookings: 0,
     pendingBookings: 0,
     totalRevenue: 0,
+    awaitingApproval: 0,
   });
   const [bookings, setBookings] = useState([]);
   const [workers, setWorkers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [busyId, setBusyId] = useState(null);
 
   useEffect(() => {
     fetchData();
@@ -43,10 +46,13 @@ export default function Dashboard({ onLogout }) {
         completedBookings: completed.length,
         pendingBookings: pending.length,
         totalRevenue: revenue,
+        awaitingApproval: allWorkers.filter(
+          w => !w.is_verified && (w.account_status || 'active') === 'active'
+        ).length,
       });
 
       setBookings(allBookings.slice(0, 10));
-      setWorkers(allWorkers.slice(0, 10));
+      setWorkers(allWorkers);
     } catch (error) {
       // A 401 is handled globally in api.js (sends the user back to login).
       if (error.response?.status !== 401) {
@@ -55,6 +61,58 @@ export default function Dashboard({ onLogout }) {
     } finally {
       setLoading(false);
     }
+  };
+
+  // Verify / suspend / ban / reinstate a worker. Each one asks first,
+  // suspend and ban also ask for a reason the worker will see.
+  const act = async (worker, kind) => {
+    let url, body, question;
+    if (kind === 'verify') {
+      url = `/admin/workers/${worker.id}/verify`; body = { verified: true };
+      question = `Verify ${worker.name}? They will be able to go online and get jobs.`;
+    } else if (kind === 'unverify') {
+      url = `/admin/workers/${worker.id}/verify`; body = { verified: false };
+      question = `Remove verification from ${worker.name}? They will be taken offline.`;
+    } else if (kind === 'reinstate') {
+      url = `/admin/workers/${worker.id}/status`; body = { status: 'active' };
+      question = `Reinstate ${worker.name}?`;
+    } else {
+      const status = kind === 'ban' ? 'banned' : 'suspended';
+      const reason = window.prompt(
+        `${kind === 'ban' ? 'Ban' : 'Suspend'} ${worker.name}.\n` +
+        `Reason (the worker will see it, max 200 characters):`
+      );
+      if (reason === null) return; // cancelled
+      url = `/admin/workers/${worker.id}/status`; body = { status, reason };
+      question = null;
+    }
+    if (question && !window.confirm(question)) return;
+
+    setBusyId(worker.id); setError(''); setNotice('');
+    try {
+      const res = await api.put(url, body);
+      if (res.data.activeJobs > 0) {
+        setNotice(
+          `${worker.name} still has ${res.data.activeJobs} active job(s). ` +
+          `Check Recent Bookings and sort them out.`
+        );
+      }
+      await fetchData();
+    } catch (err) {
+      if (err.response?.status !== 401) {
+        setError(err.response?.data?.message || 'Action failed. Check your connection and try again.');
+      }
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const accountBadge = (w) => {
+    const st = w.account_status || 'active';
+    if (st === 'banned') return { text: 'Banned', bg: '#ef444420', color: '#ef4444' };
+    if (st === 'suspended') return { text: 'Suspended', bg: '#f9731620', color: '#f97316' };
+    if (!w.is_verified) return { text: 'Pending approval', bg: '#f59e0b20', color: '#b45309' };
+    return { text: 'Verified', bg: '#10b98120', color: '#10b981' };
   };
 
   const STATUS_COLORS = {
@@ -97,6 +155,7 @@ export default function Dashboard({ onLogout }) {
       </div>
 
       {error && <div style={styles.errorBox}>{error}</div>}
+      {notice && <div style={styles.noticeBox}>{notice}</div>}
 
       {/* Stats Grid */}
       <div style={styles.statsGrid}>
@@ -122,6 +181,13 @@ export default function Dashboard({ onLogout }) {
           </div>
           <div style={styles.statLabel}>Completed</div>
         </div>
+        <div style={{ ...styles.statCard, borderTop: '4px solid #b45309' }}>
+          <div style={styles.statIcon}>📝</div>
+          <div style={{ ...styles.statNumber, color: '#b45309' }}>
+            {stats.awaitingApproval}
+          </div>
+          <div style={styles.statLabel}>Awaiting approval</div>
+        </div>
         <div style={{ ...styles.statCard, borderTop: '4px solid #f59e0b' }}>
           <div style={styles.statIcon}>⏳</div>
           <div style={{ ...styles.statNumber, color: '#f59e0b' }}>
@@ -139,6 +205,93 @@ export default function Dashboard({ onLogout }) {
       </div>
 
       <div style={styles.mainGrid}>
+
+        {/* Workers: approvals and account control */}
+        <div style={styles.card}>
+          <h2 style={styles.cardTitle}>👷 Workers</h2>
+          <table style={styles.table}>
+            <thead>
+              <tr style={styles.tableHeader}>
+                <th style={styles.th}>Name</th>
+                <th style={styles.th}>Trade</th>
+                <th style={styles.th}>Level</th>
+                <th style={styles.th}>Jobs</th>
+                <th style={styles.th}>Rating</th>
+                <th style={styles.th}>Online</th>
+                <th style={styles.th}>Account</th>
+                <th style={styles.th}>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {workers.map((worker) => {
+                const badge = accountBadge(worker);
+                const st = worker.account_status || 'active';
+                const busy = busyId === worker.id;
+                return (
+                  <tr key={worker.id} style={styles.tableRow}>
+                    <td style={styles.td}>
+                      <div>{worker.name}</div>
+                      <div style={styles.muted}>
+                        {worker.phone}
+                        {worker.cnic_last4 ? ` · CNIC ending ${worker.cnic_last4}` : ''}
+                      </div>
+                    </td>
+                    <td style={styles.td}>{worker.trade}</td>
+                    <td style={styles.td}>
+                      <span style={styles.levelBadge}>{worker.level}</span>
+                    </td>
+                    <td style={styles.td}>{worker.total_jobs}</td>
+                    <td style={styles.td}>⭐ {parseFloat(worker.rating || 0).toFixed(1)}</td>
+                    <td style={styles.td}>
+                      <span style={{
+                        ...styles.badge,
+                        backgroundColor: worker.is_online ? '#10b98120' : '#6b728020',
+                        color: worker.is_online ? '#10b981' : '#6b7280',
+                      }}>
+                        {worker.is_online ? '🟢 Online' : '🔴 Offline'}
+                      </span>
+                    </td>
+                    <td style={styles.td}>
+                      <span
+                        title={worker.status_reason || ''}
+                        style={{ ...styles.badge, backgroundColor: badge.bg, color: badge.color }}
+                      >
+                        {badge.text}
+                      </span>
+                      {worker.active_jobs > 0 && (
+                        <div style={styles.muted}>{worker.active_jobs} active job(s)</div>
+                      )}
+                    </td>
+                    <td style={styles.td}>
+                      <div style={styles.actionRow}>
+                        {!worker.is_verified && st === 'active' && (
+                          <button disabled={busy} style={styles.verifyBtn}
+                            onClick={() => act(worker, 'verify')}>Verify</button>
+                        )}
+                        {worker.is_verified && st === 'active' && (
+                          <button disabled={busy} style={styles.ghostBtn}
+                            onClick={() => act(worker, 'unverify')}>Unverify</button>
+                        )}
+                        {st === 'active' && (
+                          <button disabled={busy} style={styles.warnBtn}
+                            onClick={() => act(worker, 'suspend')}>Suspend</button>
+                        )}
+                        {st === 'active' && (
+                          <button disabled={busy} style={styles.dangerBtn}
+                            onClick={() => act(worker, 'ban')}>Ban</button>
+                        )}
+                        {st !== 'active' && (
+                          <button disabled={busy} style={styles.verifyBtn}
+                            onClick={() => act(worker, 'reinstate')}>Reinstate</button>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
 
         {/* Recent Bookings */}
         <div style={styles.card}>
@@ -169,47 +322,6 @@ export default function Dashboard({ onLogout }) {
                       color: STATUS_COLORS[booking.status],
                     }}>
                       {booking.status?.toUpperCase()}
-                    </span>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-
-        {/* Workers List */}
-        <div style={styles.card}>
-          <h2 style={styles.cardTitle}>👷 Workers</h2>
-          <table style={styles.table}>
-            <thead>
-              <tr style={styles.tableHeader}>
-                <th style={styles.th}>Name</th>
-                <th style={styles.th}>Trade</th>
-                <th style={styles.th}>Level</th>
-                <th style={styles.th}>Jobs</th>
-                <th style={styles.th}>Rating</th>
-                <th style={styles.th}>Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {workers.map((worker) => (
-                <tr key={worker.id} style={styles.tableRow}>
-                  <td style={styles.td}>{worker.name}</td>
-                  <td style={styles.td}>{worker.trade}</td>
-                  <td style={styles.td}>
-                    <span style={styles.levelBadge}>
-                      {worker.level}
-                    </span>
-                  </td>
-                  <td style={styles.td}>{worker.total_jobs}</td>
-                  <td style={styles.td}>⭐ {parseFloat(worker.rating || 0).toFixed(1)}</td>
-                  <td style={styles.td}>
-                    <span style={{
-                      ...styles.badge,
-                      backgroundColor: worker.is_online ? '#10b98120' : '#6b728020',
-                      color: worker.is_online ? '#10b981' : '#6b7280',
-                    }}>
-                      {worker.is_online ? '🟢 Online' : '🔴 Offline'}
                     </span>
                   </td>
                 </tr>
@@ -295,6 +407,40 @@ const styles = {
     marginBottom: '16px',
     fontSize: '14px',
   },
+  noticeBox: {
+    backgroundColor: '#fef3c7',
+    color: '#92400e',
+    padding: '12px 16px',
+    borderRadius: '8px',
+    marginBottom: '16px',
+    fontSize: '14px',
+  },
+  muted: {
+    color: '#999',
+    fontSize: '11px',
+    marginTop: '2px',
+  },
+  actionRow: {
+    display: 'flex',
+    gap: '6px',
+    flexWrap: 'wrap',
+  },
+  verifyBtn: {
+    backgroundColor: '#10b981', color: '#fff', border: 'none', padding: '6px 12px',
+    borderRadius: '6px', cursor: 'pointer', fontSize: '12px', fontWeight: '600',
+  },
+  ghostBtn: {
+    backgroundColor: 'transparent', color: '#6b7280', border: '1px solid #d1d5db', padding: '6px 12px',
+    borderRadius: '6px', cursor: 'pointer', fontSize: '12px', fontWeight: '600',
+  },
+  warnBtn: {
+    backgroundColor: '#fff7ed', color: '#c2410c', border: '1px solid #fdba74', padding: '6px 12px',
+    borderRadius: '6px', cursor: 'pointer', fontSize: '12px', fontWeight: '600',
+  },
+  dangerBtn: {
+    backgroundColor: '#fef2f2', color: '#b91c1c', border: '1px solid #fca5a5', padding: '6px 12px',
+    borderRadius: '6px', cursor: 'pointer', fontSize: '12px', fontWeight: '600',
+  },
   statsGrid: {
     display: 'grid',
     gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))',
@@ -325,7 +471,7 @@ const styles = {
   },
   mainGrid: {
     display: 'grid',
-    gridTemplateColumns: '1fr 1fr',
+    gridTemplateColumns: '1fr',
     gap: '24px',
   },
   card: {
@@ -380,4 +526,4 @@ const styles = {
     backgroundColor: '#f0eeff',
     color: '#6353f7',
   },
-};
+};
