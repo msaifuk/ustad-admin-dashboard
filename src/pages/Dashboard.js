@@ -17,6 +17,9 @@ export default function Dashboard({ onLogout }) {
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [busyId, setBusyId] = useState(null);
+  const [commissions, setCommissions] = useState(null); // null = server has no commission data
+  const [historyFor, setHistoryFor] = useState(null);   // the worker whose payments are open
+  const [history, setHistory] = useState([]);
 
   useEffect(() => {
     fetchData();
@@ -25,10 +28,12 @@ export default function Dashboard({ onLogout }) {
   const fetchData = async () => {
     setError('');
     try {
-      const [bookingsRes, workersRes, customersRes] = await Promise.all([
+      const [bookingsRes, workersRes, customersRes, commissionsRes] = await Promise.all([
         api.get('/admin/bookings'),
         api.get('/admin/workers'),
         api.get('/admin/customers'),
+        // Commissions are extra: if they fail, the rest of the dashboard still loads.
+        api.get('/admin/commissions').catch(() => null),
       ]);
 
       const allBookings = bookingsRes.data.bookings;
@@ -53,6 +58,8 @@ export default function Dashboard({ onLogout }) {
 
       setBookings(allBookings.slice(0, 10));
       setWorkers(allWorkers);
+      const cd = commissionsRes && commissionsRes.data;
+      setCommissions(cd && cd.totals && Array.isArray(cd.workers) ? cd : null);
     } catch (error) {
       // A 401 is handled globally in api.js (sends the user back to login).
       if (error.response?.status !== 401) {
@@ -105,6 +112,85 @@ export default function Dashboard({ onLogout }) {
     } finally {
       setBusyId(null);
     }
+  };
+
+  const pkr = (n) => 'PKR ' + Number(n || 0).toLocaleString();
+
+  const loadHistory = async (worker) => {
+    try {
+      const res = await api.get(`/admin/workers/${worker.id}/settlements`);
+      setHistoryFor(worker);
+      setHistory(res.data.payments);
+    } catch (err) {
+      if (err.response?.status !== 401) {
+        setError(err.response?.data?.message || 'Could not load payments.');
+      }
+    }
+  };
+
+  // Record money a worker handed over (their commission on cash jobs).
+  const recordPayment = async (w) => {
+    const amountText = window.prompt(
+      `${w.name} owes ${pkr(w.owed)}.\nHow much did they pay? (PKR)`,
+      String(w.owed)
+    );
+    if (amountText === null) return;
+    const amount = amountText.trim();
+    if (!/^\d{1,8}(\.\d{1,2})?$/.test(amount) || Number(amount) <= 0) {
+      setNotice('');
+      setError('Enter the amount as a number, for example 500.');
+      return;
+    }
+    const method = window.prompt(
+      'How did they pay? Type one: cash, jazzcash, easypaisa, bank or other', 'cash'
+    );
+    if (method === null) return;
+    const note = window.prompt('Note (optional, for example a transaction number):', '');
+    if (note === null) return;
+
+    setBusyId(w.id); setError(''); setNotice('');
+    try {
+      await api.post(`/admin/workers/${w.id}/settlements`, {
+        amount, method: method.trim().toLowerCase() || 'cash', note,
+      });
+      setNotice(`Recorded ${pkr(amount)} from ${w.name}.`);
+      await fetchData();
+      if (historyFor && historyFor.id === w.id) await loadHistory(w);
+    } catch (err) {
+      if (err.response?.status !== 401) {
+        setError(err.response?.data?.message || 'Could not record the payment. Try again.');
+      }
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  // Undo a payment entered by mistake. The record stays, marked as voided.
+  const voidPayment = async (payment) => {
+    const reason = window.prompt(
+      `Void the ${pkr(payment.amount)} payment?\nThe worker will owe it again. Reason:`
+    );
+    if (reason === null) return;
+    if (!reason.trim()) { setNotice(''); setError('Please give a reason to void a payment.'); return; }
+    setBusyId(historyFor.id); setError(''); setNotice('');
+    try {
+      await api.post(`/admin/settlements/${payment.id}/void`, { reason });
+      setNotice('Payment voided.');
+      await fetchData();
+      await loadHistory(historyFor);
+    } catch (err) {
+      if (err.response?.status !== 401) {
+        setError(err.response?.data?.message || 'Could not void the payment. Try again.');
+      }
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const commissionBadge = (w) => {
+    if (w.blocked) return { text: 'Over limit: no new jobs', bg: '#ef444420', color: '#ef4444' };
+    if (w.owed > 0) return { text: 'Owes', bg: '#f59e0b20', color: '#b45309' };
+    return { text: 'Settled', bg: '#10b98120', color: '#10b981' };
   };
 
   const accountBadge = (w) => {
@@ -202,6 +288,24 @@ export default function Dashboard({ onLogout }) {
           </div>
           <div style={styles.statLabel}>Total Revenue</div>
         </div>
+        {commissions && (
+          <div style={{ ...styles.statCard, borderTop: '4px solid #ef4444' }}>
+            <div style={styles.statIcon}>💵</div>
+            <div style={{ ...styles.statNumber, color: '#ef4444' }}>
+              {pkr(Math.round(commissions.totals.owed))}
+            </div>
+            <div style={styles.statLabel}>Owed to Ustad</div>
+          </div>
+        )}
+        {commissions && (
+          <div style={{ ...styles.statCard, borderTop: '4px solid #10b981' }}>
+            <div style={styles.statIcon}>🏦</div>
+            <div style={{ ...styles.statNumber, color: '#10b981' }}>
+              {pkr(Math.round(commissions.totals.collected))}
+            </div>
+            <div style={styles.statLabel}>Collected</div>
+          </div>
+        )}
       </div>
 
       <div style={styles.mainGrid}>
@@ -292,6 +396,118 @@ export default function Dashboard({ onLogout }) {
             </tbody>
           </table>
         </div>
+
+        {/* Commissions: what workers owe Ustad on cash jobs */}
+        {commissions && (
+          <div style={styles.card}>
+            <h2 style={styles.cardTitle}>💵 Commissions</h2>
+            <p style={styles.subNote}>
+              Workers keep the cash and owe Ustad a commission on every job.
+              {commissions.limit > 0
+                ? ` New jobs pause when a worker owes ${pkr(commissions.limit)} or more.`
+                : ' There is no limit set, so workers are never paused for unpaid commission.'}
+            </p>
+            <table style={styles.table}>
+              <thead>
+                <tr style={styles.tableHeader}>
+                  <th style={styles.th}>Worker</th>
+                  <th style={styles.th}>Earned</th>
+                  <th style={styles.th}>Paid</th>
+                  <th style={styles.th}>Owes</th>
+                  <th style={styles.th}>Status</th>
+                  <th style={styles.th}>Last payment</th>
+                  <th style={styles.th}>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {commissions.workers.map((w) => {
+                  const badge = commissionBadge(w);
+                  const busy = busyId === w.id;
+                  return (
+                    <tr key={w.id} style={styles.tableRow}>
+                      <td style={styles.td}>
+                        <div>{w.name}</div>
+                        <div style={styles.muted}>{w.phone} · {w.trade}</div>
+                      </td>
+                      <td style={styles.td}>{pkr(w.earned)}</td>
+                      <td style={styles.td}>{pkr(w.paid)}</td>
+                      <td style={{ ...styles.td, fontWeight: 'bold', color: w.blocked ? '#ef4444' : '#1a1a2e' }}>
+                        {pkr(w.owed)}
+                      </td>
+                      <td style={styles.td}>
+                        <span style={{ ...styles.badge, backgroundColor: badge.bg, color: badge.color }}>
+                          {badge.text}
+                        </span>
+                      </td>
+                      <td style={styles.td}>
+                        {w.last_payment_at ? new Date(w.last_payment_at).toLocaleDateString() : '-'}
+                      </td>
+                      <td style={styles.td}>
+                        <div style={styles.actionRow}>
+                          {w.owed > 0 && (
+                            <button disabled={busy} style={styles.verifyBtn}
+                              onClick={() => recordPayment(w)}>Record payment</button>
+                          )}
+                          <button disabled={busy} style={styles.ghostBtn}
+                            onClick={() => loadHistory(w)}>History</button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {/* Payment history for the worker picked above */}
+        {commissions && historyFor && (
+          <div style={styles.card}>
+            <div style={styles.historyHead}>
+              <h2 style={{ ...styles.cardTitle, marginBottom: 0 }}>
+                Payments from {historyFor.name}
+              </h2>
+              <button style={styles.ghostBtn} onClick={() => setHistoryFor(null)}>Close</button>
+            </div>
+            {history.length === 0 ? (
+              <p style={styles.subNote}>No payments recorded yet.</p>
+            ) : (
+              <table style={styles.table}>
+                <thead>
+                  <tr style={styles.tableHeader}>
+                    <th style={styles.th}>Date</th>
+                    <th style={styles.th}>Amount</th>
+                    <th style={styles.th}>Method</th>
+                    <th style={styles.th}>Note</th>
+                    <th style={styles.th}>Recorded by</th>
+                    <th style={styles.th}></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {history.map((p) => (
+                    <tr key={p.id} style={{ ...styles.tableRow, opacity: p.voided_at ? 0.55 : 1 }}>
+                      <td style={styles.td}>{new Date(p.created_at).toLocaleString()}</td>
+                      <td style={{ ...styles.td, textDecoration: p.voided_at ? 'line-through' : 'none' }}>
+                        {pkr(p.amount)}
+                      </td>
+                      <td style={styles.td}>{p.method}</td>
+                      <td style={styles.td}>{p.note || '-'}</td>
+                      <td style={styles.td}>{p.recorded_by}</td>
+                      <td style={styles.td}>
+                        {p.voided_at ? (
+                          <span style={styles.muted}>Voided: {p.void_reason}</span>
+                        ) : (
+                          <button disabled={busyId === historyFor.id} style={styles.dangerBtn}
+                            onClick={() => voidPayment(p)}>Void</button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        )}
 
         {/* Recent Bookings */}
         <div style={styles.card}>
@@ -419,6 +635,17 @@ const styles = {
     color: '#999',
     fontSize: '11px',
     marginTop: '2px',
+  },
+  subNote: {
+    color: '#777',
+    fontSize: '13px',
+    margin: '0 0 12px',
+  },
+  historyHead: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: '12px',
   },
   actionRow: {
     display: 'flex',
